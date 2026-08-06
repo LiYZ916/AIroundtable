@@ -1,0 +1,46 @@
+{
+  "status": "experimental",
+  "updated_for": "2026-08-04",
+  "composer": [
+    "#prompt-textarea",
+    "textarea[placeholder]",
+    "div[contenteditable='true']"
+  ],
+  "send_button": [
+    "button[data-testid='send-button']",
+    "button[aria-label*='Send']",
+    "button[aria-label*='发送']"
+  ],
+  "response": [
+    "article[data-testid^='conversation-turn-'] div[data-message-author-role='assistant']",
+    "div[data-message-author-role='assistant']"
+  ],
+  "stop_button": [
+    "button[data-testid='stop-button']",
+    "button[aria-label*='Stop']",
+    "button[aria-label*='停止']"
+  ],
+  "new_chat": [
+    "a[href='/']",
+    "button[aria-label*='New chat']",
+    "button[aria-label*='新聊天']"
+  ],
+  "login_markers": [
+    "#prompt-textarea",
+    "button[data-testid='profile-button']"
+  ],
+  "logged_out_markers": [
+    "button[data-testid='login-button']",
+    "button:has-text('Log in')",
+    "button:has-text('登录')"
+  ],
+  "error_markers": [
+    "[role='alert']",
+    "text=/Something went wrong|Network error|Request failed|发生错误|网络异常|请重试/"
+  ],
+  "captcha_markers": [
+    "iframe[src*='captcha']",
+    "text=/verify you are human/i",
+    "text=/验证码/"
+  ]
+}

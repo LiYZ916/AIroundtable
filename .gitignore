@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.pytest_tmp*/
+.coverage
+htmlcov/
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# Browser/test artifacts
+playwright-report/
+test-results/
+blob-report/
+*.log
+
+# Local/private runtime data
+browser_profiles/*
+!browser_profiles/.gitkeep
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+exports/*
+!exports/.gitkeep
+*.sqlite3
+*.db

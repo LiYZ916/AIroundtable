@@ -1,0 +1,52 @@
+{
+  "status": "experimental-unverified",
+  "updated_for": "2026-08-06",
+  "composer": [
+    "textarea[placeholder*='DeepSeek']",
+    "textarea[placeholder*='发送']",
+    "textarea[placeholder*='Message']",
+    "textarea",
+    "div[contenteditable='true'][role='textbox']"
+  ],
+  "send_button": [
+    "button[aria-label*='发送']",
+    "button[aria-label*='Send']",
+    "button[type='submit']"
+  ],
+  "response": [
+    "[data-message-role='assistant']",
+    "[data-role='assistant']",
+    "[class*='ds-markdown']",
+    "main [class*='markdown']",
+    "main [class*='assistant']"
+  ],
+  "stop_button": [
+    "button[aria-label*='停止']",
+    "button[aria-label*='Stop']"
+  ],
+  "new_chat": [
+    "button[aria-label*='新建']",
+    "button:has-text('新建对话')",
+    "a[href='/']"
+  ],
+  "login_markers": [
+    "textarea[placeholder*='DeepSeek']",
+    "textarea[placeholder*='发送']",
+    "textarea[placeholder*='Message']"
+  ],
+  "logged_out_markers": [
+    "button:has-text('登录')",
+    "button:has-text('Sign in')",
+    "text=/登录后同步历史/"
+  ],
+  "error_markers": [
+    "[role='alert']",
+    "text=/请求失败|生成失败|服务器繁忙|服务繁忙|网络异常|内容过长|发生错误|请重试|Server busy|Something went wrong|Context length/"
+  ],
+  "captcha_markers": [
+    "iframe[src*='captcha']",
+    "text=/验证码/",
+    "text=/安全验证/",
+    "text=/verify you are human/i"
+  ]
+}

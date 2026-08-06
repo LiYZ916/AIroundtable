@@ -1,0 +1,2 @@
+"""Core enums and exceptions."""
+

@@ -1,0 +1,13 @@
+{
+  "name": "未实现平台模板",
+  "kind": "template",
+  "enabled": false,
+  "mode": "semi_automatic",
+  "timeout_seconds": 120,
+  "max_retries": 0,
+  "login_url": "https://official.example.invalid/",
+  "selector_config": "configs/example_selectors.json",
+  "experimental": true,
+  "implementation_status": "未实现"
+}
+

@@ -1,0 +1,45 @@
+{
+  "status": "experimental-unverified",
+  "composer": [
+    ".ql-editor[contenteditable='true'][enterkeyhint='send']",
+    "textarea[placeholder]",
+    "div[contenteditable='true'][role='textbox']",
+    "div[contenteditable='true']"
+  ],
+  "send_button": [
+    "button[aria-label*='发送']",
+    "button[aria-label*='Send']",
+    "button[type='submit']"
+  ],
+  "response": [
+    "[data-role='assistant']",
+    "[data-message-role='assistant']",
+    "article [data-message-author-role='assistant']",
+    "main [class*='markdown']",
+    "main [class*='assistant']"
+  ],
+  "stop_button": [
+    "button[aria-label*='停止']",
+    "button[aria-label*='Stop']"
+  ],
+  "new_chat": [
+    "button[aria-label*='新建']",
+    "a[href*='/chat']"
+  ],
+  "login_markers": [
+    ".ql-editor[contenteditable='true'][enterkeyhint='send']:not([data-placeholder*='登录'])"
+  ],
+  "logged_out_markers": [
+    ".ql-editor[data-placeholder*='登录']",
+    "button:has-text('登录')"
+  ],
+  "error_markers": [
+    "[role='alert']",
+    "text=/请求失败|生成失败|服务繁忙|网络异常|内容过长|发生错误|请重试/"
+  ],
+  "captcha_markers": [
+    "iframe[src*='captcha']",
+    "text=/验证码/",
+    "text=/安全验证/"
+  ]
+}
