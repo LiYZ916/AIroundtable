@@ -75,6 +75,7 @@ class ProjectConfig(Model):
     multi_judge: bool = False
     moderator_name: str = "GPT"
     judge_name: str = "Kimi"
+    discussion_strategy: str = "标准共创"
     providers: list[ProviderConfig] = Field(default_factory=list)
 
 

@@ -50,6 +50,10 @@ def test_group_chat_ui_has_five_online_image_avatars_and_visual_panels(tmp_path)
     assert window.effectiveness_view is not None
     assert window.synergy_view is not None
     assert window.open_logs_button.text() == "打开运行日志"
+    assert window.strategy_combo.count() == 5
+    assert window.strategy_combo.currentText() == "标准共创"
+    assert window.history_search.placeholderText()
+    assert window.continue_button.text() == "基于本轮继续"
     assert len(window.stage_progress.labels) == 5
 
     window._select_three_ai_mode()
@@ -112,6 +116,7 @@ def test_interactive_controls_click_immediately_and_persist(tmp_path) -> None:
     QTest.mouseClick(window.revision_check, Qt.MouseButton.LeftButton)
     QTest.mouseClick(window.context_toggle, Qt.MouseButton.LeftButton)
     window.rounds_spin.setValue(2)
+    window.strategy_combo.setCurrentText("红队压力测试")
     app.processEvents()
     assert not window.anonymous_check.isChecked()
     assert not window.revision_check.isChecked()
@@ -125,6 +130,7 @@ def test_interactive_controls_click_immediately_and_persist(tmp_path) -> None:
     assert not saved.enable_revision
     assert saved.moderator_name == "模拟分析师"
     assert saved.judge_name == "模拟质疑者"
+    assert saved.discussion_strategy == "红队压力测试"
     assert {item.name for item in saved.providers if item.enabled} == mock_names
 
     window._set_configuration_enabled(False)
@@ -143,9 +149,59 @@ def test_interactive_controls_click_immediately_and_persist(tmp_path) -> None:
     assert not restored.revision_check.isChecked()
     assert restored.moderator_combo.currentText() == "模拟分析师"
     assert restored.judge_combo.currentText() == "模拟质疑者"
+    assert restored.strategy_combo.currentText() == "红队压力测试"
     assert {
         name
         for name, row in restored.provider_rows.items()
         if row.enabled_check.isChecked()
     } == mock_names
     restored.close()
+
+
+def test_history_search_and_summary_handoff_prepare_a_new_round(tmp_path) -> None:
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtWidgets import QApplication
+
+    from app.models import DiscussionRecord, FinalSynthesis, UserQuestion
+    from app.ui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    storage = SQLiteStorage(tmp_path / "data/db.sqlite3")
+    record = DiscussionRecord(
+        question=UserQuestion(
+            question="怎样设计低风险试点？",
+            background="现有用户一百人",
+            constraints="两周内完成",
+            template_name="执行决策",
+        ),
+        provider_names=["模拟分析师", "模拟质疑者"],
+        moderator_name="模拟分析师",
+        judge_names=["模拟质疑者"],
+        final_synthesis=FinalSynthesis(
+            provider_name="模拟分析师",
+            recommendation="先让十名用户参加并设置退出条件。",
+            unresolved_questions=["由谁负责验收"],
+        ),
+    )
+    storage.save_discussion(record)
+    window = MainWindow(tmp_path, build_default_registry(), storage)
+    window.show()
+    app.processEvents()
+
+    window.history_search.setText("低风险")
+    app.processEvents()
+    assert window.history_list.count() == 1
+    window.history_search.setText("不存在的主题")
+    app.processEvents()
+    assert window.history_list.count() == 0
+
+    window.current_record = record
+    window._continue_from_current_record()
+    app.processEvents()
+    assert "请基于上轮交接材料" in window.question_edit.toPlainText()
+    assert "【上轮讨论交接】" in window.background_edit.toPlainText()
+    assert "由谁负责验收" in window.background_edit.toPlainText()
+    assert window.constraints_edit.toPlainText() == "两周内完成"
+    assert window.strategy_combo.currentText() == "执行决策"
+    assert window.context_toggle.isChecked()
+    window.close()

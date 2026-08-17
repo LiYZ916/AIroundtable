@@ -116,14 +116,24 @@ class SQLiteStorage:
             ).fetchone()
         return DiscussionRecord.model_validate_json(row["payload_json"]) if row else None
 
-    def list_discussions(self, limit: int = 100) -> list[dict[str, str]]:
+    def list_discussions(
+        self, limit: int = 100, *, query: str = ""
+    ) -> list[dict[str, str]]:
+        normalized_query = " ".join(query.split())
+        where = ""
+        parameters: list[object] = []
+        if normalized_query:
+            where = "WHERE title LIKE ? OR question LIKE ? OR status LIKE ?"
+            pattern = f"%{normalized_query}%"
+            parameters.extend((pattern, pattern, pattern))
+        parameters.append(max(1, min(limit, 1000)))
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, created_at, updated_at, status, stage, title, question
-                FROM discussions ORDER BY updated_at DESC LIMIT ?
+                FROM discussions {where} ORDER BY updated_at DESC LIMIT ?
                 """,
-                (max(1, min(limit, 1000)),),
+                parameters,
             ).fetchall()
         return [dict(row) for row in rows]
 

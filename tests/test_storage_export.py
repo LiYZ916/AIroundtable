@@ -5,7 +5,7 @@ import json
 import sqlite3
 
 from app.core.enums import DiscussionStage, RunStatus
-from app.models import ProjectConfig, UserQuestion
+from app.models import DiscussionRecord, ProjectConfig, UserQuestion
 from app.orchestration import EngineEvent, RoundtableEngine
 from app.providers import build_default_registry
 from app.services import DiscussionExporter
@@ -32,6 +32,29 @@ def test_sqlite_save_load_list_and_delete(tmp_path) -> None:
     assert storage.list_discussions()[0]["id"] == record.id
     storage.delete_discussion(record.id)
     assert storage.load_discussion(record.id) is None
+
+
+def test_discussion_history_can_be_searched_without_changing_records(tmp_path) -> None:
+    storage = SQLiteStorage(tmp_path / "db.sqlite3")
+    alpha = DiscussionRecord(
+        question=UserQuestion(question="比较两个低风险试点"),
+        provider_names=["A", "B"],
+        moderator_name="A",
+        judge_names=["B"],
+    )
+    beta = DiscussionRecord(
+        question=UserQuestion(question="制定证据审计清单"),
+        provider_names=["A", "B"],
+        moderator_name="A",
+        judge_names=["B"],
+    )
+    storage.save_discussion(alpha)
+    storage.save_discussion(beta)
+
+    matches = storage.list_discussions(query="证据审计")
+    assert [item["id"] for item in matches] == [beta.id]
+    assert storage.load_discussion(alpha.id) == alpha
+    assert storage.load_discussion(beta.id) == beta
 
 
 def test_sqlite_event_and_config_round_trip(tmp_path) -> None:

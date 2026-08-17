@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -37,8 +38,10 @@ from PySide6.QtWidgets import (
 from app.core.enums import DiscussionStage, ProviderKind, ProviderMode, RunStatus
 from app.models import DiscussionRecord, ProjectConfig, ProviderConfig, UserQuestion
 from app.orchestration import EngineEvent, RoundtableEngine
+from app.prompts.templates import DISCUSSION_STRATEGIES
 from app.providers import ProviderRegistry
 from app.services.exporter import DiscussionExporter, PRIVACY_NOTICE
+from app.services.handoff import build_handoff_context
 from app.services.local_data import LocalDataManager
 from app.services.privacy import contains_sensitive_hint
 from app.storage import SQLiteStorage
@@ -315,6 +318,11 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(self.offline_mode_button)
         layout.addLayout(mode_row)
         layout.addWidget(QLabel("讨论历史"))
+        self.history_search = QLineEdit()
+        self.history_search.setClearButtonEnabled(True)
+        self.history_search.setPlaceholderText("搜索主题、问题或状态…")
+        self.history_search.textChanged.connect(self._refresh_history)
+        layout.addWidget(self.history_search)
         self.history_list = QListWidget()
         self.history_list.itemDoubleClicked.connect(lambda _item: self._load_selected_history())
         self.history_list.currentItemChanged.connect(self._update_history_action_state)
@@ -413,9 +421,16 @@ class MainWindow(QMainWindow):
         self.jury_mode_label.setProperty("juryMode", True)
         self.jury_mode_label.setToolTip("参赛裁判不会评价自己的方案；其他成功参与者自动交叉评分")
         settings.addWidget(self.jury_mode_label, 1, 3, 1, 3)
+        settings.addWidget(QLabel("策略"), 2, 0)
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(DISCUSSION_STRATEGIES)
+        self.strategy_combo.setToolTip(
+            "选择互评、修订、评分与综合共同遵循的讨论重点"
+        )
+        settings.addWidget(self.strategy_combo, 2, 1, 1, 2)
         self.preference_status = QLabel("设置会自动保存")
         self.preference_status.setProperty("preferenceStatus", True)
-        settings.addWidget(self.preference_status, 2, 0, 1, 6)
+        settings.addWidget(self.preference_status, 2, 3, 1, 3)
         settings.setColumnStretch(6, 1)
         composer_layout.addLayout(settings)
         actions = QHBoxLayout()
@@ -477,9 +492,12 @@ class MainWindow(QMainWindow):
         self.copy_result_button = QPushButton("复制")
         self.export_markdown_button = QPushButton("Markdown")
         self.export_json_button = QPushButton("JSON")
+        self.continue_button = QPushButton("基于本轮继续")
         self.copy_result_button.clicked.connect(self._copy_result)
         self.export_markdown_button.clicked.connect(self._export_markdown)
         self.export_json_button.clicked.connect(self._export_json)
+        self.continue_button.clicked.connect(self._continue_from_current_record)
+        export_row.addWidget(self.continue_button)
         export_row.addWidget(self.copy_result_button)
         export_row.addWidget(self.export_markdown_button)
         export_row.addWidget(self.export_json_button)
@@ -506,6 +524,7 @@ class MainWindow(QMainWindow):
         self.rounds_spin.valueChanged.connect(self._persist_ui_preferences)
         self.anonymous_check.toggled.connect(self._persist_ui_preferences)
         self.revision_check.toggled.connect(self._persist_ui_preferences)
+        self.strategy_combo.currentTextChanged.connect(self._persist_ui_preferences)
         self.moderator_combo.currentTextChanged.connect(self._persist_ui_preferences)
         self.judge_combo.currentTextChanged.connect(self._persist_ui_preferences)
 
@@ -661,6 +680,7 @@ class MainWindow(QMainWindow):
             self.context_toggle,
             self.background_edit,
             self.constraints_edit,
+            self.strategy_combo,
             self.moderator_combo,
             self.judge_combo,
             self.rounds_spin,
@@ -668,6 +688,7 @@ class MainWindow(QMainWindow):
             self.revision_check,
         ):
             widget.setEnabled(enabled)
+        self.history_search.setEnabled(enabled)
         self.history_list.setEnabled(enabled)
         if enabled:
             self._update_history_action_state(self.history_list.currentItem())
@@ -683,6 +704,7 @@ class MainWindow(QMainWindow):
             self.copy_result_button,
             self.export_markdown_button,
             self.export_json_button,
+            self.continue_button,
         ):
             button.setEnabled(enabled)
             button.setToolTip("" if enabled else "请先完成或恢复一轮讨论")
@@ -709,6 +731,7 @@ class MainWindow(QMainWindow):
                 multi_judge=False,
                 moderator_name=self.moderator_combo.currentText(),
                 judge_name=self.judge_combo.currentText(),
+                discussion_strategy=self.strategy_combo.currentText(),
                 providers=[provider.config for provider in self.registry.all()],
             )
         )
@@ -741,6 +764,8 @@ class MainWindow(QMainWindow):
         self.rounds_spin.setValue(min(saved.rounds, 3))
         self.anonymous_check.setChecked(saved.anonymous_review)
         self.revision_check.setChecked(saved.enable_revision)
+        strategy_index = self.strategy_combo.findText(saved.discussion_strategy)
+        self.strategy_combo.setCurrentIndex(max(strategy_index, 0))
         self.multi_judge_check.setChecked(False)
         if any(
             self.provider_rows[provider.name].enabled_check.isChecked()
@@ -816,7 +841,7 @@ class MainWindow(QMainWindow):
                 question=self.question_edit.toPlainText(),
                 background=self.background_edit.toPlainText().strip(),
                 constraints=self.constraints_edit.toPlainText().strip(),
-                template_name="群聊主题",
+                template_name=self.strategy_combo.currentText(),
             )
         except Exception as exc:
             QMessageBox.warning(self, "主题无效", str(exc))
@@ -1089,9 +1114,10 @@ class MainWindow(QMainWindow):
             "\n\n".join(effectiveness_sections) or "尚无讨论效果对比"
         )
 
-    def _refresh_history(self) -> None:
+    def _refresh_history(self, *_args: object) -> None:
         self.history_list.clear()
-        for row in self.storage.list_discussions():
+        query = self.history_search.text() if hasattr(self, "history_search") else ""
+        for row in self.storage.list_discussions(query=query):
             item = QListWidgetItem(f"{row['updated_at'][:16]}  {row['title']}")
             item.setData(Qt.ItemDataRole.UserRole, row["id"])
             self.history_list.addItem(item)
@@ -1118,9 +1144,37 @@ class MainWindow(QMainWindow):
         self.question_edit.setPlainText(record.question.question)
         self.background_edit.setPlainText(record.question.background)
         self.constraints_edit.setPlainText(record.question.constraints)
+        strategy_index = self.strategy_combo.findText(record.question.template_name)
+        if strategy_index >= 0:
+            self.strategy_combo.setCurrentIndex(strategy_index)
         self.stage_progress.set_stage(record.current_stage)
         self._populate_insights(record)
         self.global_status.setText(f"已恢复 · {record.status.value}")
+
+    def _continue_from_current_record(self) -> None:
+        record = self.current_record
+        if record is None or record.final_synthesis is None:
+            QMessageBox.information(self, "无法继续", "请先完成或恢复一轮含最终结论的讨论。")
+            return
+        handoff = build_handoff_context(record)
+        previous_background = record.question.background.strip()
+        background_parts = [
+            part
+            for part in (previous_background, "【上轮讨论交接】\n" + handoff)
+            if part
+        ]
+        self.question_edit.setPlainText(
+            record.question.question
+            + "\n\n请基于上轮交接材料，重点解决仍未解决的问题并给出下一步。"
+        )
+        self.background_edit.setPlainText("\n\n".join(background_parts))
+        self.constraints_edit.setPlainText(record.question.constraints)
+        strategy_index = self.strategy_combo.findText(record.question.template_name)
+        if strategy_index >= 0:
+            self.strategy_combo.setCurrentIndex(strategy_index)
+        self.context_toggle.setChecked(True)
+        self.question_edit.setFocus()
+        self.statusBar().showMessage("已载入上轮摘要交接；编辑主题后可开始一轮新讨论")
 
     def _delete_selected_history(self) -> None:
         item = self.history_list.currentItem()

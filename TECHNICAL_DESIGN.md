@@ -40,3 +40,12 @@
 ## 安全
 
 不接收或保存密码/API Key；配置目录、数据库、日志和导出默认被 Git 忽略；日志过滤 Cookie、Token、Authorization 等常见认证字段；清除本地数据前要求 UI 二次确认。
+
+## 开源思路集成：策略、搜索与摘要交接
+
+- `ProjectConfig.discussion_strategy` 使用带默认值的新字段，旧配置加载时自动采用“标准共创”，无需数据库迁移。
+- `UserQuestion.template_name` 保存每轮实际策略；`PromptFactory` 在独立回答、互评、修订、评分和综合五个阶段注入同一策略约束。
+- 历史搜索复用 `discussions.title/question/status` 的参数化 `LIKE` 查询，不修改讨论快照。
+- `build_handoff_context` 只读取 `FinalSynthesis` 的结构化语义字段并做长度限制，明确排除 `raw_content`。
+- “基于本轮继续”只预填可编辑输入；真正发送时仍由引擎创建新 `DiscussionRecord`，原记录保持不可变。
+- 外部项目来源、审阅提交和许可证边界记录在 `OPEN_SOURCE_REVIEW.md`。

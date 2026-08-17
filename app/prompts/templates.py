@@ -33,6 +33,32 @@ PERSPECTIVES = (
 )
 
 
+DISCUSSION_STRATEGIES = {
+    "标准共创": "平衡正确性、可执行性、风险与用户约束，优先形成一份可直接使用的综合方案。",
+    "红队压力测试": (
+        "主动寻找最强反例、失败路径、边界条件和不可逆后果；重要建议必须给出证伪方法、"
+        "停止条件或回滚方案，不能因多数参与者同意而降低质疑强度。"
+    ),
+    "证据审计": (
+        "把关键主张区分为已知事实、合理推断和待验证假设；指出证据缺口、来源要求和"
+        "最小核验步骤，缺少依据时不得用确定语气。"
+    ),
+    "执行决策": (
+        "把讨论收敛为可执行决策，明确优先级、负责人、资源、时间点、验收指标、停止条件"
+        "和下一步动作，避免只给原则性建议。"
+    ),
+    "创新发散": (
+        "先保留真正不同的解法和少数意见，再寻找跨方案的新组合；新组合必须说明为何不是"
+        "简单拼接，以及它新增了什么能力或价值。"
+    ),
+}
+
+
+def strategy_directive(question: UserQuestion) -> str:
+    name = question.template_name if question.template_name in DISCUSSION_STRATEGIES else "标准共创"
+    return f"本轮讨论策略：{name}。{DISCUSSION_STRATEGIES[name]}"
+
+
 def _text(value: object, limit: int = 1200) -> str:
     clean = " ".join(str(value or "").split())
     return clean if len(clean) <= limit else clean[:limit] + "…"
@@ -138,6 +164,7 @@ class PromptFactory:
         return f"""{DISCUSSION_RULES}
 
 阶段：独立回答。你看不到其他参与者的答案。
+{strategy_directive(question)}
 你的专属视角：{lens}
 用户问题：{question.question}
 背景：{question.background or '未提供'}
@@ -164,6 +191,7 @@ class PromptFactory:
         return f"""{DISCUSSION_RULES}
 
 阶段：匿名批量交叉评审。不要猜测回答者身份，也不要按文风评分。
+{strategy_directive(question)}
 原问题：{question.question}
 待评方案：{_compact(material, 20_000)}
 
@@ -197,6 +225,7 @@ class PromptFactory:
         return f"""{DISCUSSION_RULES}
 
 阶段：第 {round_number} 轮协同修订。
+{strategy_directive(question)}
 本轮使命：{missions.get(round_number, missions[3])}
 原问题：{question.question}
 你的当前方案：{_compact(_candidate(own), 8_000)}
@@ -235,6 +264,7 @@ class PromptFactory:
         return f"""{DISCUSSION_RULES}
 
 阶段：批量裁判评分。原问题：{question.question}
+{strategy_directive(question)}
 候选方案：{_compact(material, 28_000)}
 
 利益冲突规则：系统已经从候选列表中硬性移除可能由你创作的方案。只能评价当前明确列出的 candidate_alias；即使你从记忆、文风或上下文猜到被移除的自有方案，也不得补写、打分、排名或暗示其优劣。不要猜测任何方案作者身份。
@@ -290,6 +320,7 @@ reason、comparative_reason 各不超过 80 字，evidence 最多两项，避免
         return f"""{DISCUSSION_RULES}
 
 阶段：主持人综合。不要简单选择最高分方案，也不要把各方案逐段拼接。
+{strategy_directive(question)}
 原问题：{question.question}
 背景：{question.background or '未提供'}
 约束：{question.constraints or '未提供'}
