@@ -28,6 +28,20 @@ QLineEdit, QTextEdit, QTextBrowser, QComboBox, QSpinBox, QListWidget {
   selection-background-color: #315efb;
 }
 QTextBrowser { background: #fbfcfe; }
+QCheckBox {
+  spacing: 7px; padding: 5px 7px; border-radius: 6px; min-height: 20px;
+}
+QCheckBox:hover { background: #eef2ff; }
+QCheckBox:disabled { color: #98a2b3; background: #f2f4f7; }
+QComboBox:disabled, QSpinBox:disabled, QTextEdit:disabled, QToolButton:disabled {
+  color: #98a2b3; background: #f2f4f7; border-color: #e4e7ec;
+}
+QLabel[juryMode="true"] {
+  color: #284b9b; background: #e8eefc; border-radius: 7px; padding: 5px 8px;
+}
+QLabel[preferenceStatus="true"] { color: #667085; font-size: 11px; }
+QLabel[preferenceStatus="true"][state="ok"] { color: #168a62; }
+QLabel[preferenceStatus="true"][state="error"] { color: #b42318; }
 QPushButton {
   background: #edf1f7; border: 1px solid #d5dce8; border-radius: 6px; padding: 6px 10px;
 }

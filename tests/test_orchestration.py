@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -27,6 +28,36 @@ class ProgressMockProvider(MockAIProvider):
         if callable(callback):
             callback("partial response")
         return await super().wait_for_response()
+
+
+class SelfPromotingMockProvider(CountingMockProvider):
+    """Simulate a judge that tries to smuggle its excluded solution into its ballot."""
+
+    async def wait_for_response(self):
+        raw = await super().wait_for_response()
+        if self._current_stage != DiscussionStage.JUDGE:
+            return raw
+        own_alias = str(self.config.metadata.get("own_alias", ""))
+        data = json.loads(raw)
+        scores = data.get("scores", [])
+        if not own_alias or not scores:
+            return raw
+        template = scores[0]
+        suffixes = {
+            candidate_alias.split("·", 1)[1]
+            for candidate_alias in self._runtime_context.get("candidate_aliases", [])
+            if "·" in candidate_alias
+        }
+        for suffix in suffixes:
+            spoofed = dict(template)
+            spoofed["candidate_alias"] = f"{own_alias}·{suffix}"
+            spoofed["rank"] = 1
+            spoofed["dimensions"] = {
+                key: 10 for key in template.get("dimensions", {})
+            }
+            spoofed["reason"] = "试图给自己的方案满分"
+            scores.append(spoofed)
+        return json.dumps(data, ensure_ascii=False)
 
 
 class FailOnceMockProvider(MockAIProvider):
@@ -76,8 +107,8 @@ def test_complete_roundtable_flow() -> None:
         }
         assert len(targets) == 2
     assert len(record.rounds[0].revisions) == 3
-    assert len(record.rounds[0].scores) == 3
-    assert len(record.rounds[0].baseline_scores) == 3
+    assert len(record.rounds[0].scores) == 6
+    assert len(record.rounds[0].baseline_scores) == 6
     assert record.rounds[0].effectiveness is not None
     assert record.rounds[0].effectiveness.average_overall_delta > 0
     assert record.final_synthesis is not None
@@ -91,15 +122,21 @@ def test_complete_roundtable_flow() -> None:
     assert len(set(record.final_synthesis.decision_scores.values())) > 1
 
 
-def test_four_provider_standard_protocol_uses_fourteen_calls() -> None:
+def test_four_provider_conflict_free_protocol_uses_seventeen_calls() -> None:
     providers = []
     for name, role in zip(
         ("GPT", "Kimi", "元宝", "豆包"),
         ("analyst", "skeptic", "pragmatist", "systems"),
     ):
+        provider_class = SelfPromotingMockProvider if name == "Kimi" else CountingMockProvider
         providers.append(
-            CountingMockProvider(
-                ProviderConfig(name=name, kind=ProviderKind.MOCK, mode=ProviderMode.MOCK),
+            provider_class(
+                ProviderConfig(
+                    name=name,
+                    kind=ProviderKind.MOCK,
+                    mode=ProviderMode.MOCK,
+                    metadata={"own_alias": "方案 B"} if name == "Kimi" else {},
+                ),
                 role=role,
                 delay=0,
             )
@@ -115,16 +152,38 @@ def test_four_provider_standard_protocol_uses_fourteen_calls() -> None:
         )
 
     record = asyncio.run(scenario())
-    assert sum(len(provider.calls) for provider in providers) == 14
+    assert sum(len(provider.calls) for provider in providers) == 17
     assert {provider.name: len(provider.calls) for provider in providers} == {
-        "GPT": 4,
+        "GPT": 5,
         "Kimi": 4,
-        "元宝": 3,
-        "豆包": 3,
+        "元宝": 4,
+        "豆包": 4,
     }
     assert len(record.rounds[0].reviews) == 12
-    assert len(record.rounds[0].scores) == 4
-    assert len(record.rounds[0].baseline_scores) == 4
+    assert len(record.rounds[0].scores) == 12
+    assert len(record.rounds[0].baseline_scores) == 12
+    author_by_alias = {
+        f"方案 {chr(65 + index)}": name
+        for index, name in enumerate(record.provider_names)
+    }
+    for score in [
+        *record.rounds[0].baseline_scores,
+        *record.rounds[0].scores,
+    ]:
+        assert score.judge_name != author_by_alias[score.base_alias]
+    for score_group in (
+        record.rounds[0].baseline_scores,
+        record.rounds[0].scores,
+    ):
+        for candidate_alias, author in author_by_alias.items():
+            actual_judges = {
+                score.judge_name
+                for score in score_group
+                if score.base_alias == candidate_alias
+            }
+            assert actual_judges == set(record.provider_names) - {author}
+    assert record.settings["judge_conflict_policy"] == "leave_one_out_panel"
+    assert record.settings["effective_judge_names"] == ["Kimi", "GPT", "元宝", "豆包"]
 
 
 def test_review_starts_only_after_every_independent_call_finishes() -> None:
@@ -159,7 +218,7 @@ def test_review_starts_only_after_every_independent_call_finishes() -> None:
     assert barrier and max(independent_finishes) < barrier[0] < review_start
 
 
-def test_failed_judge_falls_back_to_moderator() -> None:
+def test_failed_participating_judge_is_covered_by_conflict_free_panel() -> None:
     providers = []
     for name, role in (("GPT", "analyst"), ("Kimi", "skeptic"), ("元宝", "pragmatist")):
         metadata = {"fail_stage": "judge_scoring"} if name == "Kimi" else {}
@@ -187,8 +246,15 @@ def test_failed_judge_falls_back_to_moderator() -> None:
         )
 
     record = asyncio.run(scenario())
+    author_by_alias = {"方案 A": "GPT", "方案 B": "Kimi", "方案 C": "元宝"}
+    assert {score.base_alias for score in record.rounds[0].scores} == set(author_by_alias)
+    assert {score.judge_name for score in record.rounds[0].scores} == {"GPT", "元宝"}
     assert len(record.rounds[0].scores) == 3
-    assert {score.judge_name for score in record.rounds[0].scores} == {"GPT"}
+    assert record.settings["judge_ballots_per_candidate_by_round"]["1"] == 1
+    assert all(
+        score.judge_name != author_by_alias[score.base_alias]
+        for score in record.rounds[0].scores
+    )
 
 
 def test_failed_moderator_uses_local_fallback_synthesis() -> None:
@@ -461,7 +527,7 @@ def test_multiple_review_rounds_are_persisted_in_record() -> None:
     assert len(record.rounds) == 2
     assert all(len(round_item.reviews) == 6 for round_item in record.rounds)
     assert len(record.rounds[1].revisions) == 3
-    assert len(record.rounds[1].scores) == 3
+    assert len(record.rounds[1].scores) == 6
 
 
 def test_single_provider_failure_does_not_abort_others() -> None:

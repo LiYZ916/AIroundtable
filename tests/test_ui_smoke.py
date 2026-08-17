@@ -63,6 +63,89 @@ def test_group_chat_ui_has_five_online_image_avatars_and_visual_panels(tmp_path)
     assert window.judge_combo.currentText() == "Kimi"
 
     window.provider_rows["模拟分析师"].enabled_check.setChecked(True)
-    assert window._sync_provider_config() == ["Kimi", "元宝", "豆包", "DeepSeek"]
-    assert not window.provider_rows["模拟分析师"].enabled_check.isChecked()
+    assert window._sync_provider_config() == ["模拟分析师"]
+    assert all(
+        not window.provider_rows[name].enabled_check.isChecked()
+        for name in online_names
+    )
     window.close()
+
+
+def test_interactive_controls_click_immediately_and_persist(tmp_path) -> None:
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from app.ui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    storage = SQLiteStorage(tmp_path / "data/db.sqlite3")
+    window = MainWindow(tmp_path, build_default_registry(), storage)
+    window.show()
+    app.processEvents()
+
+    assert not window.history_load_button.isEnabled()
+    assert not window.history_delete_button.isEnabled()
+    assert not window.copy_result_button.isEnabled()
+    assert not window.export_markdown_button.isEnabled()
+    assert not window.export_json_button.isEnabled()
+
+    QTest.mouseClick(window.offline_mode_button, Qt.MouseButton.LeftButton)
+    app.processEvents()
+    mock_names = {"模拟分析师", "模拟质疑者", "模拟执行顾问"}
+    selected = {
+        name
+        for name, row in window.provider_rows.items()
+        if row.enabled_check.isChecked()
+    }
+    assert selected == mock_names
+    assert window.moderator_combo.currentText() == "模拟分析师"
+    assert window.judge_combo.currentText() == "模拟质疑者"
+
+    participant_check = window.provider_rows["模拟执行顾问"].enabled_check
+    QTest.mouseClick(participant_check, Qt.MouseButton.LeftButton)
+    assert not participant_check.isChecked()
+    QTest.mouseClick(participant_check, Qt.MouseButton.LeftButton)
+    assert participant_check.isChecked()
+
+    QTest.mouseClick(window.anonymous_check, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.revision_check, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.context_toggle, Qt.MouseButton.LeftButton)
+    window.rounds_spin.setValue(2)
+    app.processEvents()
+    assert not window.anonymous_check.isChecked()
+    assert not window.revision_check.isChecked()
+    assert window.context_panel.isVisible()
+    assert window.preference_status.text() == "设置已自动保存"
+
+    saved = storage.load_config()
+    assert saved is not None
+    assert saved.rounds == 2
+    assert not saved.anonymous_review
+    assert not saved.enable_revision
+    assert saved.moderator_name == "模拟分析师"
+    assert saved.judge_name == "模拟质疑者"
+    assert {item.name for item in saved.providers if item.enabled} == mock_names
+
+    window._set_configuration_enabled(False)
+    assert not window.anonymous_check.isEnabled()
+    assert not window.provider_rows["模拟分析师"].enabled_check.isEnabled()
+    assert not window.offline_mode_button.isEnabled()
+    assert not window.history_list.isEnabled()
+    window._set_configuration_enabled(True)
+    assert window.anonymous_check.isEnabled()
+    assert window.provider_rows["模拟分析师"].enabled_check.isEnabled()
+    window.close()
+
+    restored = MainWindow(tmp_path, build_default_registry(), storage)
+    assert restored.rounds_spin.value() == 2
+    assert not restored.anonymous_check.isChecked()
+    assert not restored.revision_check.isChecked()
+    assert restored.moderator_combo.currentText() == "模拟分析师"
+    assert restored.judge_combo.currentText() == "模拟质疑者"
+    assert {
+        name
+        for name, row in restored.provider_rows.items()
+        if row.enabled_check.isChecked()
+    } == mock_names
+    restored.close()

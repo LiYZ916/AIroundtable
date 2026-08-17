@@ -226,12 +226,19 @@ class PromptFactory:
             {"candidate_alias": alias, "content": _judge_candidate(candidate)}
             for alias, candidate in candidates
         ]
+        comparison_rule = (
+            "先做两两比较再评分。禁止‘大家都不错’、并列第一、所有方案集中在同一分数段或每个维度都给相同分数。"
+            "必须明确一个最佳方案和一个最弱方案；同一快照内 rank 不得重复。"
+            if len(candidates) > 1
+            else "当前输入仅有一个可评候选：只评价该候选并令 rank=1，不得虚构其他方案进行比较。"
+        )
         return f"""{DISCUSSION_RULES}
 
 阶段：批量裁判评分。原问题：{question.question}
 候选方案：{_compact(material, 28_000)}
 
-先做两两比较再评分。禁止“大家都不错”、并列第一、所有方案集中在同一分数段或每个维度都给相同分数。必须明确一个最佳方案和一个最弱方案；同一快照内 rank 不得重复。
+利益冲突规则：系统已经从候选列表中硬性移除可能由你创作的方案。只能评价当前明确列出的 candidate_alias；即使你从记忆、文风或上下文猜到被移除的自有方案，也不得补写、打分、排名或暗示其优劣。不要猜测任何方案作者身份。
+{comparison_rule}
 评分锚点：0–3=存在致命缺陷，4–5=明显不足，6–7=可用但需改进，8–9=有充分证据的强方案，10=极少使用且近乎完备。正确性、约束匹配或风险控制任一低于 4 时必须判为淘汰。
 决策分由系统按权重计算：正确性22%、约束匹配16%、可执行性16%、风险控制14%、证据12%、逻辑10%、客观性5%、不确定性表达5%。不要自行平均。
 reason、comparative_reason 各不超过 80 字，evidence 最多两项，避免冗长输出。

@@ -73,6 +73,8 @@ class ProjectConfig(Model):
     anonymous_review: bool = True
     enable_revision: bool = True
     multi_judge: bool = False
+    moderator_name: str = "GPT"
+    judge_name: str = "Kimi"
     providers: list[ProviderConfig] = Field(default_factory=list)
 
 

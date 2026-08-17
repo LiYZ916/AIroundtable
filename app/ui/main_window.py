@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -61,6 +62,17 @@ class UiBridge(QObject):
     provider_operation = Signal(object)
 
 
+class InteractiveCheckBox(QCheckBox):
+    """Make the full visible checkbox area clickable, not only its label glyphs."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def hitButton(self, position) -> bool:  # noqa: N802 - Qt virtual method name
+        return self.rect().contains(position)
+
+
 class ProviderRow(QFrame):
     open_requested = Signal(str)
     check_requested = Signal(str)
@@ -68,6 +80,7 @@ class ProviderRow(QFrame):
     def __init__(self, config: ProviderConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.config = config
+        self.action_buttons: list[QPushButton] = []
         self.setProperty("providerRow", True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 7, 8, 7)
@@ -87,7 +100,7 @@ class ProviderRow(QFrame):
         layout.addLayout(text, 1)
         controls = QVBoxLayout()
         controls.setSpacing(3)
-        self.enabled_check = QCheckBox("参与")
+        self.enabled_check = InteractiveCheckBox("参与")
         self.enabled_check.setChecked(config.enabled)
         self.mode_combo = QComboBox()
         if config.kind == ProviderKind.MOCK:
@@ -103,25 +116,38 @@ class ProviderRow(QFrame):
         if config.kind == ProviderKind.WEB:
             actions = QVBoxLayout()
             actions.setSpacing(3)
-            open_button = QPushButton("登录")
-            open_button.setProperty("compactAction", True)
-            check_button = QPushButton("检测")
-            check_button.setProperty("compactAction", True)
-            open_button.clicked.connect(lambda: self.open_requested.emit(config.name))
-            check_button.clicked.connect(lambda: self.check_requested.emit(config.name))
-            actions.addWidget(open_button)
-            actions.addWidget(check_button)
+            self.open_button = QPushButton("登录")
+            self.open_button.setProperty("compactAction", True)
+            self.check_button = QPushButton("检测")
+            self.check_button.setProperty("compactAction", True)
+            self.open_button.clicked.connect(lambda: self.open_requested.emit(config.name))
+            self.check_button.clicked.connect(lambda: self.check_requested.emit(config.name))
+            self.action_buttons = [self.open_button, self.check_button]
+            actions.addWidget(self.open_button)
+            actions.addWidget(self.check_button)
             layout.addLayout(actions)
 
     def sync_to_config(self) -> None:
         self.config.enabled = self.enabled_check.isChecked()
-        self.config.mode = self.mode_combo.currentData()
+        mode = self.mode_combo.currentData()
+        self.config.mode = mode if isinstance(mode, ProviderMode) else ProviderMode(str(mode))
 
     def set_status(self, text: str, *, ok: bool | None = None) -> None:
         self.status_label.setText(text)
         self.status_label.setProperty("state", "ok" if ok is True else "error" if ok is False else "normal")
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
+
+    def set_configuration_enabled(self, enabled: bool) -> None:
+        self.enabled_check.setEnabled(enabled)
+        self.mode_combo.setEnabled(enabled)
+        for button in self.action_buttons:
+            button.setEnabled(enabled)
+        tooltip = "" if enabled else "讨论运行中，结束后可修改或检测平台"
+        self.enabled_check.setToolTip(tooltip)
+        self.mode_combo.setToolTip(tooltip)
+        for button in self.action_buttons:
+            button.setToolTip(tooltip)
 
 
 class ManualResponseDialog(QDialog):
@@ -190,10 +216,16 @@ class MainWindow(QMainWindow):
         self.manual_dialog: ManualResponseDialog | None = None
         self.pending_manual: dict[str, EngineEvent] = {}
         self.login_wizard: LoginWizard | None = None
+        self._ui_ready = False
+        self._updating_provider_selection = False
         self._build_ui()
         if not self._load_saved_config():
             self._select_online_mode()
         self._refresh_history()
+        self._refresh_role_options()
+        self._connect_preference_controls()
+        self._ui_ready = True
+        self._persist_ui_preferences()
 
     def _build_ui(self) -> None:
         self.setWindowTitle("AI Roundtable — 五 AI 协同圆桌")
@@ -240,10 +272,10 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(QLabel("参与者"))
         top.addStretch()
-        wizard = QPushButton("登录向导")
-        wizard.setObjectName("primaryButton")
-        wizard.clicked.connect(self._show_login_wizard)
-        top.addWidget(wizard)
+        self.login_wizard_button = QPushButton("登录向导")
+        self.login_wizard_button.setObjectName("primaryButton")
+        self.login_wizard_button.clicked.connect(self._show_login_wizard)
+        top.addWidget(self.login_wizard_button)
         layout.addLayout(top)
         provider_scroll = QScrollArea()
         provider_scroll.setWidgetResizable(True)
@@ -272,35 +304,40 @@ class MainWindow(QMainWindow):
         provider_scroll.setWidget(provider_container)
         layout.addWidget(provider_scroll, 3)
         mode_row = QHBoxLayout()
-        online = QPushButton("启用全自动五 AI")
-        three_ai = QPushButton("四 AI 测试（无 GPT）")
-        offline = QPushButton("离线演示")
-        online.clicked.connect(self._activate_online_mode)
-        three_ai.clicked.connect(self._select_no_gpt_mode)
-        offline.clicked.connect(self._select_offline_mode)
-        mode_row.addWidget(online)
-        mode_row.addWidget(three_ai)
-        mode_row.addWidget(offline)
+        self.online_mode_button = QPushButton("启用全自动五 AI")
+        self.no_gpt_mode_button = QPushButton("四 AI 测试（无 GPT）")
+        self.offline_mode_button = QPushButton("离线演示")
+        self.online_mode_button.clicked.connect(self._activate_online_mode)
+        self.no_gpt_mode_button.clicked.connect(self._select_no_gpt_mode)
+        self.offline_mode_button.clicked.connect(self._select_offline_mode)
+        mode_row.addWidget(self.online_mode_button)
+        mode_row.addWidget(self.no_gpt_mode_button)
+        mode_row.addWidget(self.offline_mode_button)
         layout.addLayout(mode_row)
         layout.addWidget(QLabel("讨论历史"))
         self.history_list = QListWidget()
         self.history_list.itemDoubleClicked.connect(lambda _item: self._load_selected_history())
+        self.history_list.currentItemChanged.connect(self._update_history_action_state)
         layout.addWidget(self.history_list, 2)
         history_actions = QHBoxLayout()
-        load = QPushButton("恢复")
-        delete = QPushButton("删除")
-        load.clicked.connect(self._load_selected_history)
-        delete.clicked.connect(self._delete_selected_history)
-        history_actions.addWidget(load)
-        history_actions.addWidget(delete)
+        self.history_load_button = QPushButton("恢复")
+        self.history_delete_button = QPushButton("删除")
+        self.history_load_button.setEnabled(False)
+        self.history_delete_button.setEnabled(False)
+        self.history_load_button.setToolTip("请先选择一条讨论记录")
+        self.history_delete_button.setToolTip("请先选择一条讨论记录")
+        self.history_load_button.clicked.connect(self._load_selected_history)
+        self.history_delete_button.clicked.connect(self._delete_selected_history)
+        history_actions.addWidget(self.history_load_button)
+        history_actions.addWidget(self.history_delete_button)
         layout.addLayout(history_actions)
-        clear_data = QPushButton("清除全部本地数据")
-        clear_data.setObjectName("dangerButton")
-        clear_data.clicked.connect(self._clear_all_data)
+        self.clear_data_button = QPushButton("清除全部本地数据")
+        self.clear_data_button.setObjectName("dangerButton")
+        self.clear_data_button.clicked.connect(self._clear_all_data)
         self.open_logs_button = QPushButton("打开运行日志")
         self.open_logs_button.clicked.connect(self._open_log_directory)
         layout.addWidget(self.open_logs_button)
-        layout.addWidget(clear_data)
+        layout.addWidget(self.clear_data_button)
         return panel
 
     def _open_log_directory(self) -> None:
@@ -345,31 +382,41 @@ class MainWindow(QMainWindow):
         context_layout.addWidget(self.constraints_edit)
         self.context_panel.hide()
         composer_layout.addWidget(self.context_panel)
-        settings = QHBoxLayout()
-        settings.addWidget(QLabel("主持"))
+        settings = QGridLayout()
+        settings.setHorizontalSpacing(8)
+        settings.setVerticalSpacing(5)
+        settings.addWidget(QLabel("主持"), 0, 0)
         self.moderator_combo = QComboBox()
         self.moderator_combo.addItems([provider.name for provider in self.registry.all()])
         self.moderator_combo.setCurrentText("GPT")
-        settings.addWidget(self.moderator_combo)
-        settings.addWidget(QLabel("裁判"))
+        settings.addWidget(self.moderator_combo, 0, 1)
+        settings.addWidget(QLabel("裁判"), 0, 2)
         self.judge_combo = QComboBox()
         self.judge_combo.addItems([provider.name for provider in self.registry.all()])
         self.judge_combo.setCurrentText("Kimi")
-        settings.addWidget(self.judge_combo)
-        settings.addWidget(QLabel("轮数"))
+        settings.addWidget(self.judge_combo, 0, 3)
+        settings.addWidget(QLabel("轮数"), 0, 4)
         self.rounds_spin = QSpinBox()
         self.rounds_spin.setRange(1, 3)
         self.rounds_spin.setValue(1)
-        settings.addWidget(self.rounds_spin)
-        self.anonymous_check = QCheckBox("匿名互评")
+        settings.addWidget(self.rounds_spin, 0, 5)
+        self.anonymous_check = InteractiveCheckBox("匿名互评")
         self.anonymous_check.setChecked(True)
-        self.revision_check = QCheckBox("修订")
+        self.revision_check = InteractiveCheckBox("修订")
         self.revision_check.setChecked(True)
-        self.multi_judge_check = QCheckBox("多裁判")
-        settings.addWidget(self.anonymous_check)
-        settings.addWidget(self.revision_check)
-        settings.addWidget(self.multi_judge_check)
-        settings.addStretch()
+        settings.addWidget(self.anonymous_check, 1, 0, 1, 2)
+        settings.addWidget(self.revision_check, 1, 2)
+        self.multi_judge_check = InteractiveCheckBox()
+        self.multi_judge_check.setChecked(False)
+        self.multi_judge_check.hide()
+        self.jury_mode_label = QLabel("评分：自动无利益冲突评审团")
+        self.jury_mode_label.setProperty("juryMode", True)
+        self.jury_mode_label.setToolTip("参赛裁判不会评价自己的方案；其他成功参与者自动交叉评分")
+        settings.addWidget(self.jury_mode_label, 1, 3, 1, 3)
+        self.preference_status = QLabel("设置会自动保存")
+        self.preference_status.setProperty("preferenceStatus", True)
+        settings.addWidget(self.preference_status, 2, 0, 1, 6)
+        settings.setColumnStretch(6, 1)
         composer_layout.addLayout(settings)
         actions = QHBoxLayout()
         privacy = QLabel("不要提交密码、Cookie、Token 或其他敏感信息")
@@ -427,15 +474,16 @@ class MainWindow(QMainWindow):
         self.insight_tabs.addTab(score_page, "评分")
         layout.addWidget(self.insight_tabs, 1)
         export_row = QHBoxLayout()
-        copy = QPushButton("复制")
-        markdown = QPushButton("Markdown")
-        json_button = QPushButton("JSON")
-        copy.clicked.connect(self._copy_result)
-        markdown.clicked.connect(self._export_markdown)
-        json_button.clicked.connect(self._export_json)
-        export_row.addWidget(copy)
-        export_row.addWidget(markdown)
-        export_row.addWidget(json_button)
+        self.copy_result_button = QPushButton("复制")
+        self.export_markdown_button = QPushButton("Markdown")
+        self.export_json_button = QPushButton("JSON")
+        self.copy_result_button.clicked.connect(self._copy_result)
+        self.export_markdown_button.clicked.connect(self._export_markdown)
+        self.export_json_button.clicked.connect(self._export_json)
+        export_row.addWidget(self.copy_result_button)
+        export_row.addWidget(self.export_markdown_button)
+        export_row.addWidget(self.export_json_button)
+        self._set_result_actions_enabled(False)
         layout.addLayout(export_row)
         notice = QLabel(PRIVACY_NOTICE)
         notice.setWordWrap(True)
@@ -447,19 +495,102 @@ class MainWindow(QMainWindow):
         self.context_panel.setVisible(expanded)
         self.context_toggle.setText("收起背景与约束 ▴" if expanded else "补充背景与约束 ▾")
 
-    def _select_online_mode(self) -> None:
-        for provider in self.registry.all():
-            self.provider_rows[provider.name].enabled_check.setChecked(
-                provider.config.kind == ProviderKind.WEB
+    def _connect_preference_controls(self) -> None:
+        for name, row in self.provider_rows.items():
+            row.enabled_check.toggled.connect(
+                lambda checked, provider_name=name: self._on_provider_toggled(
+                    provider_name, checked
+                )
             )
-            if provider.config.kind == ProviderKind.WEB:
-                provider.config.mode = ProviderMode.AUTOMATIC
+            row.mode_combo.currentIndexChanged.connect(self._persist_ui_preferences)
+        self.rounds_spin.valueChanged.connect(self._persist_ui_preferences)
+        self.anonymous_check.toggled.connect(self._persist_ui_preferences)
+        self.revision_check.toggled.connect(self._persist_ui_preferences)
+        self.moderator_combo.currentTextChanged.connect(self._persist_ui_preferences)
+        self.judge_combo.currentTextChanged.connect(self._persist_ui_preferences)
+
+    def _on_provider_toggled(self, name: str, checked: bool) -> None:
+        if not self._ui_ready or self._updating_provider_selection:
+            return
+        self._updating_provider_selection = True
+        try:
+            provider = self.registry.get(name)
+            if checked:
+                opposite = (
+                    self.registry.mocks()
+                    if provider.config.kind == ProviderKind.WEB
+                    else self.registry.web()
+                )
+                for other in opposite:
+                    self.provider_rows[other.name].enabled_check.setChecked(False)
+            for row in self.provider_rows.values():
+                row.sync_to_config()
+        finally:
+            self._updating_provider_selection = False
+        self._refresh_role_options()
+        self._persist_ui_preferences()
+
+    def _refresh_role_options(
+        self,
+        preferred_moderator: str | None = None,
+        preferred_judge: str | None = None,
+    ) -> None:
+        selected = [
+            name for name, row in self.provider_rows.items() if row.enabled_check.isChecked()
+        ]
+        moderator = preferred_moderator or self.moderator_combo.currentText()
+        judge = preferred_judge or self.judge_combo.currentText()
+        was_updating = self._updating_provider_selection
+        self._updating_provider_selection = True
+        try:
+            self.moderator_combo.clear()
+            self.judge_combo.clear()
+            self.moderator_combo.addItems(selected)
+            self.judge_combo.addItems(selected)
+            if selected:
+                moderator = moderator if moderator in selected else selected[0]
+                judge = (
+                    judge
+                    if judge in selected
+                    else "Kimi"
+                    if "Kimi" in selected
+                    else selected[min(1, len(selected) - 1)]
+                )
+                self.moderator_combo.setCurrentText(moderator)
+                self.judge_combo.setCurrentText(judge)
+        finally:
+            self._updating_provider_selection = was_updating
+
+    def _apply_provider_preset(
+        self,
+        selected: set[str],
+        moderator: str,
+        judge: str,
+        status: str,
+    ) -> None:
+        self._updating_provider_selection = True
+        try:
+            for provider in self.registry.all():
                 row = self.provider_rows[provider.name]
-                automatic_index = row.mode_combo.findData(ProviderMode.AUTOMATIC)
-                if automatic_index >= 0:
-                    row.mode_combo.setCurrentIndex(automatic_index)
-        self.moderator_combo.setCurrentText("GPT")
-        self.judge_combo.setCurrentText("Kimi")
+                row.enabled_check.setChecked(provider.name in selected)
+                if provider.name in selected and provider.config.kind == ProviderKind.WEB:
+                    automatic_index = row.mode_combo.findData(ProviderMode.AUTOMATIC)
+                    if automatic_index >= 0:
+                        row.mode_combo.setCurrentIndex(automatic_index)
+                row.sync_to_config()
+        finally:
+            self._updating_provider_selection = False
+        self._refresh_role_options(moderator, judge)
+        self.global_status.setText(status)
+        self._persist_ui_preferences()
+
+    def _select_online_mode(self) -> None:
+        self._apply_provider_preset(
+            {provider.name for provider in self.registry.web()},
+            "GPT",
+            "Kimi",
+            "全自动五 AI",
+        )
 
     def _activate_online_mode(self) -> None:
         self._select_online_mode()
@@ -470,25 +601,20 @@ class MainWindow(QMainWindow):
 
     def _select_no_gpt_mode(self) -> None:
         selected = {"Kimi", "元宝", "豆包", "DeepSeek"}
-        for provider in self.registry.all():
-            row = self.provider_rows[provider.name]
-            row.enabled_check.setChecked(provider.name in selected)
-            if provider.name in selected:
-                provider.config.mode = ProviderMode.AUTOMATIC
-                automatic_index = row.mode_combo.findData(ProviderMode.AUTOMATIC)
-                if automatic_index >= 0:
-                    row.mode_combo.setCurrentIndex(automatic_index)
-        self.moderator_combo.setCurrentText("DeepSeek")
-        self.judge_combo.setCurrentText("Kimi")
-        self.global_status.setText("四 AI 测试：Kimi · 元宝 · 豆包 · DeepSeek")
+        self._apply_provider_preset(
+            selected,
+            "DeepSeek",
+            "Kimi",
+            "四 AI 测试：Kimi · 元宝 · 豆包 · DeepSeek",
+        )
 
     def _select_offline_mode(self) -> None:
-        for provider in self.registry.all():
-            self.provider_rows[provider.name].enabled_check.setChecked(
-                provider.config.kind == ProviderKind.MOCK
-            )
-        self.moderator_combo.setCurrentText("模拟分析师")
-        self.judge_combo.setCurrentText("模拟质疑者")
+        self._apply_provider_preset(
+            {provider.name for provider in self.registry.mocks()},
+            "模拟分析师",
+            "模拟质疑者",
+            "离线演示模式",
+        )
 
     def _sync_provider_config(self) -> list[str]:
         web_selected = any(
@@ -507,6 +633,72 @@ class MainWindow(QMainWindow):
                 enabled.append(name)
         return enabled
 
+    def _persist_ui_preferences(self, *_args: object) -> None:
+        if not self._ui_ready or self._updating_provider_selection:
+            return
+        for row in self.provider_rows.values():
+            row.sync_to_config()
+        try:
+            self._save_config()
+            self.preference_status.setText("设置已自动保存")
+            self.preference_status.setProperty("state", "ok")
+        except Exception as exc:
+            self.preference_status.setText(f"设置保存失败：{exc}")
+            self.preference_status.setProperty("state", "error")
+        self.preference_status.style().unpolish(self.preference_status)
+        self.preference_status.style().polish(self.preference_status)
+
+    def _set_configuration_enabled(self, enabled: bool) -> None:
+        for row in self.provider_rows.values():
+            row.set_configuration_enabled(enabled)
+        for widget in (
+            self.login_wizard_button,
+            self.online_mode_button,
+            self.no_gpt_mode_button,
+            self.offline_mode_button,
+            self.clear_data_button,
+            self.question_edit,
+            self.context_toggle,
+            self.background_edit,
+            self.constraints_edit,
+            self.moderator_combo,
+            self.judge_combo,
+            self.rounds_spin,
+            self.anonymous_check,
+            self.revision_check,
+        ):
+            widget.setEnabled(enabled)
+        self.history_list.setEnabled(enabled)
+        if enabled:
+            self._update_history_action_state(self.history_list.currentItem())
+        else:
+            self.history_load_button.setEnabled(False)
+            self.history_delete_button.setEnabled(False)
+        self.preference_status.setText(
+            "设置已自动保存" if enabled else "本轮运行中；结束后可修改设置"
+        )
+
+    def _set_result_actions_enabled(self, enabled: bool) -> None:
+        for button in (
+            self.copy_result_button,
+            self.export_markdown_button,
+            self.export_json_button,
+        ):
+            button.setEnabled(enabled)
+            button.setToolTip("" if enabled else "请先完成或恢复一轮讨论")
+
+    def _update_history_action_state(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None = None,
+    ) -> None:
+        enabled = current is not None
+        self.history_load_button.setEnabled(enabled)
+        self.history_delete_button.setEnabled(enabled)
+        tooltip = "" if enabled else "请先选择一条讨论记录"
+        self.history_load_button.setToolTip(tooltip)
+        self.history_delete_button.setToolTip(tooltip)
+
     def _save_config(self) -> None:
         self.storage.save_config(
             ProjectConfig(
@@ -514,7 +706,9 @@ class MainWindow(QMainWindow):
                 concurrency=4,
                 anonymous_review=self.anonymous_check.isChecked(),
                 enable_revision=self.revision_check.isChecked(),
-                multi_judge=self.multi_judge_check.isChecked(),
+                multi_judge=False,
+                moderator_name=self.moderator_combo.currentText(),
+                judge_name=self.judge_combo.currentText(),
                 providers=[provider.config for provider in self.registry.all()],
             )
         )
@@ -547,7 +741,7 @@ class MainWindow(QMainWindow):
         self.rounds_spin.setValue(min(saved.rounds, 3))
         self.anonymous_check.setChecked(saved.anonymous_review)
         self.revision_check.setChecked(saved.enable_revision)
-        self.multi_judge_check.setChecked(saved.multi_judge)
+        self.multi_judge_check.setChecked(False)
         if any(
             self.provider_rows[provider.name].enabled_check.isChecked()
             for provider in self.registry.web()
@@ -555,6 +749,7 @@ class MainWindow(QMainWindow):
             for provider in self.registry.mocks():
                 provider.config.enabled = False
                 self.provider_rows[provider.name].enabled_check.setChecked(False)
+        self._refresh_role_options(saved.moderator_name, saved.judge_name)
         return True
 
     def _show_login_wizard(self) -> None:
@@ -640,7 +835,7 @@ class MainWindow(QMainWindow):
         if judge not in names:
             judge = "Kimi" if "Kimi" in names else names[min(1, len(names) - 1)]
             self.judge_combo.setCurrentText(judge)
-        judges = names if self.multi_judge_check.isChecked() else [judge]
+        judges = [judge]
         self._save_config()
         self.chat_stream.clear_messages()
         self.result_view.clear()
@@ -648,6 +843,7 @@ class MainWindow(QMainWindow):
         self.score_radar.set_scores([])
         self.score_summary.setText("尚无评分")
         self.current_record = None
+        self._set_result_actions_enabled(False)
         self.chat_stream.upsert(
             ChatMessageView(
                 id=question.id,
@@ -659,6 +855,7 @@ class MainWindow(QMainWindow):
         )
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self._set_configuration_enabled(False)
         self.global_status.setText("讨论进行中")
         future = self.runner.submit(
             self.engine.run(
@@ -670,7 +867,7 @@ class MainWindow(QMainWindow):
                 concurrency=4,
                 anonymous_review=self.anonymous_check.isChecked(),
                 enable_revision=self.revision_check.isChecked(),
-                multi_judge=self.multi_judge_check.isChecked(),
+                multi_judge=False,
             )
         )
         def done(item: Future) -> None:
@@ -797,6 +994,8 @@ class MainWindow(QMainWindow):
         self.current_record = record
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self._set_configuration_enabled(True)
+        self._set_result_actions_enabled(True)
         self.global_status.setText("已完成" if record.status == RunStatus.SUCCEEDED else record.status.value)
         self.stage_progress.set_stage(record.current_stage)
         self._populate_insights(record)
@@ -807,6 +1006,7 @@ class MainWindow(QMainWindow):
     def _on_run_failed(self, message: str) -> None:
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self._set_configuration_enabled(True)
         self.global_status.setText("讨论失败")
         QMessageBox.critical(self, "讨论失败", message)
         self._refresh_history()
@@ -895,6 +1095,7 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"{row['updated_at'][:16]}  {row['title']}")
             item.setData(Qt.ItemDataRole.UserRole, row["id"])
             self.history_list.addItem(item)
+        self._update_history_action_state(self.history_list.currentItem())
 
     def _load_selected_history(self) -> None:
         item = self.history_list.currentItem()
@@ -904,6 +1105,7 @@ class MainWindow(QMainWindow):
         if not record:
             return
         self.current_record = record
+        self._set_result_actions_enabled(True)
         self.chat_stream.clear_messages()
         for message in record_to_chat_messages(record):
             provider = None
@@ -930,9 +1132,11 @@ class MainWindow(QMainWindow):
         self._refresh_history()
 
     def _copy_result(self) -> None:
-        if self.current_record:
-            QApplication.clipboard().setText(DiscussionExporter.to_markdown(self.current_record))
-            self.statusBar().showMessage("完整结果已复制")
+        if not self.current_record:
+            QMessageBox.information(self, "暂无结果", "请先完成或恢复一轮讨论。")
+            return
+        QApplication.clipboard().setText(DiscussionExporter.to_markdown(self.current_record))
+        self.statusBar().showMessage("完整结果已复制")
 
     def _export_markdown(self) -> None:
         if not self.current_record:
@@ -965,6 +1169,7 @@ class MainWindow(QMainWindow):
             self.runner.submit(self.registry.close_all()).result(timeout=8)
             removed = self.data_manager.clear_all()
             self.current_record = None
+            self._set_result_actions_enabled(False)
             self.chat_stream.clear_messages()
             self.result_view.clear()
             self.consensus_view.clear()

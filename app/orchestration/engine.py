@@ -907,10 +907,48 @@ class RoundtableEngine:
             candidate_items.append((version_alias, candidate))
             alias_meta[version_alias] = (aliases[name], snapshot, candidate)
 
+        selected_judges = list(dict.fromkeys(judge_names))
+        conflicted_judges = [name for name in selected_judges if name in candidates]
+        evaluator_names = selected_judges
+        if conflicted_judges:
+            # A participating judge can often recognise its own answer despite aliases.
+            # Use every successful participant as a juror and hard-exclude each juror's
+            # own candidate. This gives every candidate the same N-1 independent ballots.
+            evaluator_names = list(dict.fromkeys([*selected_judges, *candidates]))
+            self.current_record.settings["judge_conflict_policy"] = "leave_one_out_panel"
+            self.current_record.settings["effective_judge_names"] = evaluator_names
+            self._save()
+            self._emit(
+                "judge_conflict_free_panel",
+                "参赛裁判已切换为无利益冲突评审团；每位评审者均看不到自己的方案",
+                stage,
+                status=RunStatus.WAITING,
+                selected_judges=selected_judges,
+                conflicted_judges=conflicted_judges,
+                effective_judges=evaluator_names,
+            )
+
+        author_by_base_alias = {
+            alias: name for name, alias in aliases.items() if name in candidates
+        }
+
+        def eligible_items(
+            judge_name: str,
+            items: list[tuple[str, AIResponse | RevisedResponse]],
+        ) -> list[tuple[str, AIResponse | RevisedResponse]]:
+            own_alias = aliases.get(judge_name, "") if judge_name in candidates else ""
+            return [
+                item
+                for item in items
+                if not own_alias or alias_meta[item[0]][0] != own_alias
+            ]
+
         async def run_judge(
             judge_name: str,
-            items: list[tuple[str, AIResponse | RevisedResponse]] = candidate_items,
-        ) -> tuple[ProviderCall, str]:
+            requested_items: list[tuple[str, AIResponse | RevisedResponse]] | None = None,
+        ) -> tuple[ProviderCall, str, set[str]]:
+            items = eligible_items(judge_name, requested_items or candidate_items)
+            allowed_aliases = {alias for alias, _ in items}
             prompt = PromptFactory.judge_batch(question, items)
             call = await self._call_provider(
                 self.registry.get(judge_name),
@@ -919,12 +957,21 @@ class RoundtableEngine:
                 batch=True,
                 candidate_aliases=[alias for alias, _ in items],
             )
-            return call, judge_name
+            return call, judge_name, allowed_aliases
 
-        def parse_call(call: ProviderCall, judge_name: str) -> list[JudgeScore]:
+        def parse_call(
+            call: ProviderCall,
+            judge_name: str,
+            allowed_aliases: set[str],
+        ) -> list[JudgeScore]:
             parsed: list[JudgeScore] = []
+            seen_aliases: set[str] = set()
             for item in self._score_items(call.raw):
                 candidate_alias = str(item.get("candidate_alias", ""))
+                # Do not trust model output to honour the exclusion. An attempted
+                # self-score or duplicate ballot is discarded at the parser boundary.
+                if candidate_alias not in allowed_aliases or candidate_alias in seen_aliases:
+                    continue
                 meta = alias_meta.get(candidate_alias)
                 if meta is None:
                     continue
@@ -965,32 +1012,60 @@ class RoundtableEngine:
                         elapsed_seconds=call.elapsed_seconds,
                     )
                 )
+                seen_aliases.add(candidate_alias)
             return parsed
 
         results = await self._parallel(
-            [lambda name=name: run_judge(name) for name in judge_names]
+            [lambda name=name: run_judge(name) for name in evaluator_names]
         )
         scores: list[JudgeScore] = []
-        for call, judge_name in results:
+        for call, judge_name, allowed_aliases in results:
             if not call.error:
-                scores.extend(parse_call(call, judge_name))
+                scores.extend(parse_call(call, judge_name, allowed_aliases))
 
         expected = set(alias_meta)
         scored_aliases = {score.candidate_alias for score in scores}
         missing = expected - scored_aliases
-        if missing and moderator_name not in judge_names:
+        if missing:
             self._emit(
                 "judge_fallback",
-                f"裁判结果缺少 {len(missing)} 个候选，回退由 {moderator_name} 补充评分",
+                f"评审团结果缺少 {len(missing)} 个候选，改由无利益冲突的评审者补评",
                 stage,
-                moderator_name,
                 status=RunStatus.WAITING,
                 missing_aliases=sorted(missing),
             )
-            missing_items = [item for item in candidate_items if item[0] in missing]
-            fallback_call, fallback_name = await run_judge(moderator_name, missing_items)
-            if not fallback_call.error:
-                scores.extend(parse_call(fallback_call, fallback_name))
+            successful_judges = list(dict.fromkeys(score.judge_name for score in scores))
+            fallback_pool = list(
+                dict.fromkeys(
+                    [moderator_name, *successful_judges, *evaluator_names, *candidates]
+                )
+            )
+            fallback_groups: dict[str, list[str]] = {}
+            for candidate_alias in sorted(missing):
+                base_alias = alias_meta[candidate_alias][0]
+                author = author_by_base_alias.get(base_alias, "")
+                fallback_name = next(
+                    (name for name in fallback_pool if name != author),
+                    "",
+                )
+                if fallback_name:
+                    fallback_groups.setdefault(fallback_name, []).append(candidate_alias)
+
+            fallback_jobs = []
+            for fallback_name, aliases_to_score in fallback_groups.items():
+                missing_items = [
+                    item for item in candidate_items if item[0] in aliases_to_score
+                ]
+                fallback_jobs.append(
+                    lambda name=fallback_name, items=missing_items: run_judge(name, items)
+                )
+            for fallback_call, fallback_name, allowed_aliases in await self._parallel(
+                fallback_jobs
+            ):
+                if not fallback_call.error:
+                    scores.extend(
+                        parse_call(fallback_call, fallback_name, allowed_aliases)
+                    )
 
         remaining = expected - {score.candidate_alias for score in scores}
         if remaining:
@@ -1000,6 +1075,48 @@ class RoundtableEngine:
                 stage,
                 status=RunStatus.FAILED,
                 missing_aliases=sorted(remaining),
+            )
+
+        if conflicted_judges and not remaining:
+            ballots_by_candidate = {
+                candidate_alias: [
+                    score for score in scores if score.candidate_alias == candidate_alias
+                ]
+                for candidate_alias in expected
+            }
+            ballots_per_candidate = min(
+                len(ballots) for ballots in ballots_by_candidate.values()
+            )
+            evaluator_priority = {
+                name: index for index, name in enumerate(evaluator_names)
+            }
+            balanced_scores: list[JudgeScore] = []
+            discarded_ballots = 0
+            for candidate_alias in sorted(ballots_by_candidate):
+                ballots = sorted(
+                    ballots_by_candidate[candidate_alias],
+                    key=lambda score: (
+                        evaluator_priority.get(score.judge_name, len(evaluator_priority)),
+                        score.judge_name,
+                    ),
+                )
+                balanced_scores.extend(ballots[:ballots_per_candidate])
+                discarded_ballots += max(0, len(ballots) - ballots_per_candidate)
+            scores = balanced_scores
+            panel_counts = self.current_record.settings.setdefault(
+                "judge_ballots_per_candidate_by_round", {}
+            )
+            panel_counts[str(round_number)] = ballots_per_candidate
+            self._save()
+            self._emit(
+                "judge_panel_balanced",
+                f"无利益冲突评分已按每个候选 {ballots_per_candidate} 票对齐",
+                stage,
+                status=(
+                    RunStatus.WAITING if discarded_ballots else RunStatus.SUCCEEDED
+                ),
+                ballots_per_candidate=ballots_per_candidate,
+                discarded_ballots=discarded_ballots,
             )
 
         groups: dict[tuple[str, str], list[JudgeScore]] = {}
